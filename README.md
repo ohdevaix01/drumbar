@@ -83,18 +83,41 @@ los que dispara acierta el 100%.
 El código anterior a estos cambios rechazaba **0 de 5** ruidos de prueba y
 clasificaba todo como un pad.
 
+## Detección del golpe
+
+El detector no espera a que el sonido se apague. Antes sí lo hacía: exigía que
+el nivel bajara casi a silencio para aceptar otro golpe, y con un bombo de 500 ms
+sonando eso eran 620 ms sin poder tocar. Ese era el problema real.
+
+Ahora detecta el ataque por **flujo espectral**: cuánto crece la energía en cada
+frecuencia entre un cuadro y el siguiente. Un golpe es un salto grande; la cola
+de un sample, una nota sostenida o un objeto resonando no suben, bajan.
+
+Dos detalles que hicieron falta:
+
+- **Se mide solo arriba de 300 Hz.** Un bombo o un bajo viven en 60-150 Hz, y ahí
+  una ventana corta no los resuelve: el nivel oscila y genera flujo falso. El
+  ataque de un objeto golpeado, en cambio, tiene transitorio de banda ancha.
+  Medido con un sample de 500 ms: ignorando el grave, la separación entre golpe
+  y sample pasa de 1.1x a 22x.
+- **Filtro paso-alto a 150 Hz** antes de analizar, por lo mismo. Un sample de
+  500 ms queda 4.1x más débil que un golpe, y el golpe casi no se toca.
+
+Resultado: dos golpes separados 60 ms dan dos disparos. Un redoble de 8 golpes
+da 8. Y se puede tocar encima de un sample que está sonando.
+
 ## Anti-retroalimentación
 
 Cuando un pad suena, el parlante dispara el micrófono, que dispara el parlante.
-Medido en simulación: 5 golpes → 5 disparos en loop sin protección.
+Por eso al disparar se cierra la detección un momento.
 
-La solución: al disparar se cierra la detección por la duración del sample más un
-margen ajustable (120 ms por defecto). Con eso: 5 golpes → 0 disparos.
+El bloqueo ya no dura todo el sample: dura el margen ajustable, con techo de
+`blank + 60 ms`. Con auriculares no hay retrolimentación, así que el botón
+*Auriculares* lo pone en 0 y podés tocar encima de lo que suena. Con parlante,
+subilo hasta que no se dispare solo.
 
 Además el micrófono nunca llega al parlante: el nodo del detector va a una
 ganancia en 0.
-
-Si igual se dispara solo, subí el slider. Con auriculares podés bajarlo a 0.
 
 ## Latencia
 

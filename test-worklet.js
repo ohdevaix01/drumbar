@@ -172,5 +172,71 @@ const dLong = decayOf(0.08, 30, 950);
 check("decaimiento separa sonido corto de largo", dLong > dShort,
   `corto=${dShort.toFixed(2)} largo=${dLong.toFixed(2)}`);
 
+/* 12. re-disparo rapido: el punto de todo el rediseno.
+   Antes habia que esperar a que el sonido se apagara. Ahora dos golpes
+   seguidos tienen que dar dos disparos, incluso encima de un sonido sonando. */
+function twoHits(gapMs) {
+  const det = makeDet();
+  posted = [];
+  hit(det, 0.08, 400);
+  // relleno hasta completar la separacion pedida (un hit dura ~16 bloques)
+  const hitBlocks = 16, hitMs = hitBlocks * 128 / SR * 1000;
+  const padBlocks = Math.max(0, Math.round((gapMs - hitMs) / (128 / SR * 1000)));
+  for (let i = 0; i < padBlocks; i++) feed(det, 0.001, 128, 700 + i);
+  hit(det, 0.08, 500);
+  silence(det, 200);
+  return onsets().length;
+}
+check("dos golpes seguidos dan dos disparos", twoHits(60) === 2,
+  "separacion 60 ms -> " + twoHits(60) + " disparos");
+check("tres golpes seguidos dan tres disparos", (function(){
+  const det = makeDet();
+  posted = [];
+  hit(det, 0.08, 400); hit(det, 0.08, 500); hit(det, 0.08, 600);
+  silence(det, 200);
+  return onsets().length;
+})() === 3, "tres golpes encadenados");
+
+/* 13. un golpe solo no dispara dos veces (el bug opuesto) */
+check("un golpe no dispara dos veces", (function(){
+  const det = makeDet();
+  posted = [];
+  hit(det, 0.08, 400);
+  silence(det, 300);
+  return onsets().length;
+})() === 1, "un golpe");
+
+/* 14. el grave de un sample sonando no dispara solo.
+   El ataque inicial del sample SI es un transitorio real y dispara una vez
+   (la app lo cubre con el bloqueo). Lo que no puede pasar es que la cola
+   siga disparando mientras suena. */
+check("un tono grave sonando no re-dispara", (function(){
+  const det = makeDet();
+  // arranca el tono antes de medir, para saltear el ataque inicial
+  for (let b = 0; b < 30; b++) {
+    const buf = new Float32Array(128);
+    for (let i = 0; i < 128; i++) {
+      const t = (b * 128 + i) / SR;
+      buf[i] = (Math.sin(2 * Math.PI * 60 * t) * 0.5 +
+                Math.sin(2 * Math.PI * 120 * t) * 0.2) * Math.exp(-t / 0.25) * 0.5;
+    }
+    T += 128 / SR;
+    det.process([[buf]]);
+  }
+  posted = [];
+  // sigue sonando 600 ms mas: no tiene que disparar
+  for (let b = 30; b < 100; b++) {
+    const buf = new Float32Array(128);
+    for (let i = 0; i < 128; i++) {
+      const t = (b * 128 + i) / SR;
+      buf[i] = (Math.sin(2 * Math.PI * 60 * t) * 0.5 +
+                Math.sin(2 * Math.PI * 120 * t) * 0.2) * Math.exp(-t / 0.25) * 0.5;
+    }
+    T += 128 / SR;
+    det.process([[buf]]);
+  }
+  return onsets().length;
+})() === 0, "cola de un tono grave");
+
 console.log(`\n${ok} OK, ${fail} FALLA`);
 process.exit(fail ? 1 : 0);

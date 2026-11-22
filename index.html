@@ -87,7 +87,7 @@
   </div>
   <label>Bloqueo despues de cada sonido <span id="blankVal">120 ms</span></label>
   <input type="range" id="blank" min="0" max="400" step="10" value="120">
-  <div class="stat">Si el parlante dispara el trigger, subi este valor. Con auriculares podes bajarlo a 0.</div>
+  <div class="stat">Con auriculares ponelo en 0: podes tocar encima del sample que esta sonando. Con parlante, subilo hasta que no se dispare solo.</div>
   <div class="row" style="margin-top:8px">
     <button id="btnFbTest" class="ghost">Probar</button>
   </div>
@@ -577,9 +577,12 @@ function play(pad, gain){
   g.connect(S.masterGain);
   s.start();
 
-  // lo que sale por el parlante lo vuelve a captar el microfono y dispararia
-  // el trigger en loop: se cierra la deteccion mientras suena
-  suppressFor(buf.duration*1000 + S.blankMs);
+  // Anti-retroalimentacion. Antes se cerrava la deteccion durante TODA la
+  // duracion del sample mas el margen, asi que un bombo de 500 ms bloqueva
+  // 620 ms y no se podia tocar de nuevo. Con auriculares no hay retrolimentacion
+  // en absoluto, asi que el bloqueo solo tiene que tapar el pico del ataque,
+  // no toda la cola. El slider sigue mandando para el caso con parlante.
+  suppressFor(Math.min(buf.duration*1000, S.blankMs + 60));
 }
 
 function suppressFor(ms){
@@ -872,11 +875,10 @@ async function useHeadphones(){
     var outs = devices.filter(function(d){ return d.kind === "audiooutput"; });
     if(!outs.length){ log("el navegador no expone salidas; igual podes conectar auriculares"); return; }
     log("salidas: "+outs.map(function(d){ return d.label||"sin nombre"; }).join(", "));
-    $("blank").value = 30;
-    $("blankVal").textContent = "30 ms";
-    S.blankMs = 30;
-    if(S.useWorklet && S.node) S.node.port.postMessage({ type:"blank", value:30 });
-    log("con auriculares el bloqueo se puede bajar a 0 ms");
+    $("blank").value = 0;
+    $("blankVal").textContent = "0 ms";
+    S.blankMs = 0;
+    log("bloqueo en 0: podes tocar encima de lo que esta sonando");
   }catch(err){ log("no se pudieron listar las salidas: "+err.message); }
 }
 

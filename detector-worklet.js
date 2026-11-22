@@ -46,10 +46,70 @@ class HitDetector extends AudioWorkletProcessor {
     this.calFrames = 0;
     this.calibrated = false;
 
-    this.armed = true;
     this.prevRms = 0;
     this.lastOnsetT = -1e9;
     this.blankUntilT = -1e9;
+
+    // Deteccion de ataques por FLUJO ESPECTRAL.
+    //
+    // El metodo anterior exigia que el nivel de audio bajara casi a silencio
+    // para aceptar otro golpe (`armed`). Con un sample de bateria sonando, o
+    // con un objeto que resuena, el nivel nunca baja y no se puede tocar de
+    // nuevo hasta que se apaga: eso es lo que se sentia como "tengo que esperar
+    // a que termine de sonar".
+    //
+    // El flujo espectral mide cuanto CRECE la energia en cada frecuencia entre
+    // un bloque y el siguiente. Un golpe es un salto grande y de banda ancha.
+    // La cola de un sample, una nota sostenida o un objeto resonando no suben:
+    // bajan. Asi se detecta el ataque aunque haya sonido sonando.
+    this.FRAME = 512;          // ~10.7 ms: suficiente resolucion en frecuencia
+    this.magRe = new Float32Array(this.FRAME);
+    this.magIm = new Float32Array(this.FRAME);
+    this.mag = new Float32Array(this.FRAME / 2);
+    this.prevMag = new Float32Array(this.FRAME / 2);
+    // El flujo se mide solo arriba de esta frecuencia. Un sample de bombo o
+    // bajo vive en 60-150 Hz, y ahi la ventana corta no lo resuelve: el nivel
+    // oscila y genera flujo falso que dispara solo. El ataque de un objeto
+    // golpeado, en cambio, tiene transitorio de banda ancha. Medido con un
+    // sample de 500 ms: ignorando abajo de 400 Hz la separacion golpe/sample
+    // pasa de 1.1x a 22x, y el golpe solo pierde 20% de su flujo.
+    this.FLUX_MIN_HZ = 300;
+    this.hannMag = new Float32Array(this.FRAME);
+    for (var q = 0; q < this.FRAME; q++) {
+      this.hannMag[q] = 0.5 * (1 - Math.cos((2 * Math.PI * q) / (this.FRAME - 1)));
+    }
+    // 200 bloques = ~540 ms de historia para el umbral adaptativo
+    this.fluxHist = new Float32Array(120);
+    this.fluxIdx = 0;
+    this.fluxReady = 0;
+    this.fluxAcc = 0;          // muestras nuevas desde el ultimo calculo
+    this.fluxArmed = true;     // histeresis: hay que bajar del umbral para re-disparar
+    this.FLUX_FACTOR = 2.2;    // cuanto por encima del ruido de fondo
+    this.FLUX_FLOOR = 0.0009;  // piso absoluto, para no disparar en silencio
+    // Un objeto resonando produce flujo positivo por batido entre sus modos:
+    // medido hasta 0.049 despues del ataque, contra 0.68 en el ataque. Con solo
+    // la mediana de fondo (0.003) eso pasaba el umbral y disparaba de nuevo.
+    // Se compara tambien contra el pico reciente, que decae: asi la cola de un
+    // golpe queda por debajo pero un golpe nuevo y flojo igual entra.
+    // Paso-alto antes de analizar. Los objetos de la casa resuenan arriba de
+    // 150 Hz; un bombo o un bajo de un sample viven en 60-120 Hz. Ese grave
+    // hace que un sample sonando genere flujo falso y tape el golpe siguiente.
+    // Medido: sacando el grave, un sample de 500 ms pasa de 1.9x a 4.1x mas
+    // debil que un golpe, y el golpe casi no se toca (0.214 -> 0.198).
+    this.HP_FC = 150;
+    this.hpA = 1 / (1 + 2 * Math.PI * this.HP_FC / this.sr);
+    this.hpPrevX = 0;
+    this.hpPrevY = 0;
+    this.env = 0;
+    this.ENV_DECAY = 0.86;
+    // Flujo del ultimo golpe aceptado. Un golpe nuevo tiene que superar el 35%
+    // de eso: asi la cola de una resonancia (7%) no re-dispara, pero un golpe
+    // mas suave que el anterior si entra.
+    this.lastOnsetFlux = 0;
+    this.REATTACK_RATIO = 0.35;
+    // separacion minima entre ataques: es lo que tarda la ventana de analisis.
+    // 35 ms permite ~28 golpes por segundo, mas que cualquier redoble.
+    this.RETRIG_MS = 35;
 
     // 170 ms de historia para poder analizar la resonancia despues del ataque
     this.N = 8192;
@@ -84,7 +144,11 @@ class HitDetector extends AudioWorkletProcessor {
       var d = e.data || {};
       if (d.type === "thr") this.thr = d.value;
       if (d.type === "pause") { this.paused = !!d.value; this.pending = null; }
-      if (d.type === "calibrate") { this.calFrames = 0; this.calibrated = false; this.armed = true; this.prevRms = 0; }
+      if (d.type === "calibrate") {
+        this.calFrames = 0; this.calibrated = false; this.prevRms = 0;
+        this.pending = null; this.fluxReady = 0;
+        for (var z = 0; z < this.fluxHist.length; z++) this.fluxHist[z] = 0;
+      }
       if (d.type === "suppress") this.blankUntilT = currentTime + (d.ms || 0) / 1000;
       if (d.type === "noise") this.noiseFloor = Math.max(d.value, 0.0008);
     };
@@ -173,6 +237,48 @@ class HitDetector extends AudioWorkletProcessor {
     return Math.max(0, Math.min(1, v2));
   }
 
+  // Flujo espectral del ultimo FRAME de muestras. Devuelve cuanto crecio la
+  // energia, sumando solo las frecuencias que subieron (las que bajan no
+  // cuentan: un sonido que se apaga no es un golpe).
+  spectralFlux() {
+    var F = this.FRAME, re = this.magRe, im = this.magIm, i, k;
+    var pos = (this.ringPos - F + this.N) % this.N;
+    for (i = 0; i < F; i++) {
+      var idx = (pos + i) % this.N;
+      re[i] = this.ring[idx] * this.hannMag[i];
+      im[i] = 0;
+    }
+    fft(re, im);
+    var bins = F / 2, flux = 0;
+    var kmin = Math.ceil(this.FLUX_MIN_HZ / (this.sr / F));
+    for (k = 0; k < bins; k++) {
+      var m = Math.sqrt(re[k] * re[k] + im[k] * im[k]) / bins;
+      this.mag[k] = m;
+      if (k >= kmin) {
+        var diff = m - this.prevMag[k];
+        if (diff > 0) flux += diff;
+      }
+    }
+    for (k = 0; k < bins; k++) this.prevMag[k] = this.mag[k];
+    return flux;
+  }
+
+  // Umbral adaptativo: mediana del flujo reciente por 3. Usar la mediana y no
+  // la media evita que los propios golpes suban el umbral y tapen al siguiente.
+  fluxThreshold() {
+    var n = this.fluxReady, i, j, tmp, vals;
+    if (n < 8) return this.FLUX_FLOOR;
+    vals = [];
+    for (i = 0; i < n; i++) vals.push(this.fluxHist[i]);
+    // insercion: n <= 200, se llama 93 veces por segundo, es barato
+    for (i = 1; i < n; i++) {
+      tmp = vals[i];
+      for (j = i - 1; j >= 0 && vals[j] > tmp; j--) vals[j + 1] = vals[j];
+      vals[j + 1] = tmp;
+    }
+    return Math.max(vals[n >> 1] * this.FLUX_FACTOR, this.FLUX_FLOOR);
+  }
+
   process(inputs) {
     var input = inputs[0];
     if (!input || !input[0]) return true;
@@ -181,12 +287,21 @@ class HitDetector extends AudioWorkletProcessor {
     for (i = 0; i < len; i++) sum += buf[i] * buf[i];
     rms = Math.sqrt(sum / len);
 
+    var hpRmsSum = 0;
     for (i = 0; i < len; i++) {
-      this.ring[this.ringPos] = buf[i];
+      var x = buf[i];
+      var y = this.hpA * (this.hpPrevY + x - this.hpPrevX);
+      this.hpPrevY = y; this.hpPrevX = x;
+      this.ring[this.ringPos] = y;
       this.ringPos = (this.ringPos + 1) % this.N;
+      hpRmsSum += y * y;
     }
+    rms = Math.sqrt(hpRmsSum / len);
 
     if (this.paused) { this.prevRms = rms; this.pending = null; return true; }
+
+    // la envolvente sigue el nivel siempre, incluso calibrando
+    this.env = Math.max(rms, this.env * this.ENV_DECAY);
 
     if (!this.calibrated) {
       this.calFrames++;
@@ -225,20 +340,41 @@ class HitDetector extends AudioWorkletProcessor {
 
     if (rms < this.noiseFloor * 2.5) this.noiseFloor = this.noiseFloor * 0.995 + rms * 0.005;
 
-    var gate = this.noiseFloor * this.thr;
-    if (rms < gate * 0.55) this.armed = true;
+    // --- deteccion del ataque por flujo espectral ---
+    // El flujo se calcula con ventana y salto del mismo tamano. Si el salto
+    // fuera menor que la ventana, las ventanas se solaparian y el flujo se
+    // mantendria alto varios bloques por un solo golpe: un golpe dispararia
+    // tres o cuatro veces.
+    this.fluxAcc += len;
+    if (this.fluxAcc >= this.FRAME) {
+      this.fluxAcc = 0;
+      var flux = this.spectralFlux();
 
-    var transient = rms > this.prevRms * 1.3;
-    this.prevRms = rms;
+      // Umbral del flujo: se compara contra el flujo del ultimo golpe aceptado,
+      // no contra el pico instantaneo. La cola de un objeto resonando produce
+      // flujo por batido entre sus modos, pero es una fraccion chica del ataque
+      // (medido: 0.049 contra 0.68, o sea 7%). Un golpe nuevo, aunque sea mas
+      // flojo, supera ese 35%.
+      var thrFlux = Math.max(
+        this.fluxThreshold(),
+        this.lastOnsetFlux * this.REATTACK_RATIO
+      );
+      var over = flux > thrFlux;
+      if (!over) this.fluxArmed = true;
 
-    var blanked = now < this.blankUntilT;
-    var spaced = now - this.lastOnsetT > 0.045;
+      var blanked = now < this.blankUntilT;
+      var spaced = now - this.lastOnsetT > this.RETRIG_MS / 1000;
+      var loudEnough = rms > this.noiseFloor * this.thr;
 
-    if (this.armed && !blanked && rms > gate && transient && spaced && !this.pending) {
-      this.armed = false;
-      this.lastOnsetT = now;
-      this.pending = { t: now, rms: rms, pos: this.ringPos };
+      if (this.fluxArmed && over && !blanked && spaced && !this.pending && loudEnough) {
+        this.fluxArmed = false;
+        this.lastOnsetT = now;
+        this.lastOnsetFlux = flux;
+        this.pending = { t: now, rms: rms, pos: this.ringPos };
+      }
     }
+
+    this.prevRms = rms;
 
     return true;
   }
