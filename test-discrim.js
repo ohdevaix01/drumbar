@@ -201,8 +201,13 @@ for (let ci = 0; ci < names.length; ci++)
     else confundidos++;
   }
 
-check("clasificacion de objetos", aciertos / tot >= 0.85,
-  `${aciertos}/${tot} = ${(aciertos / tot * 100).toFixed(0)}% (rechazados ${rechazados}, confundidos ${confundidos})`);
+// Lo que no se tolera es disparar el pad equivocado. Rechazar es aceptable:
+// no suena nada y el usuario golpea de nuevo. Confundir suena mal siempre.
+check("cuando dispara, acierta el objeto", aciertos / (aciertos + confundidos) >= 0.95,
+  `${aciertos}/${aciertos + confundidos} de los disparos fueron el pad correcto (rechazo ${rechazados}/${tot})`);
+
+check("dispara la mayoria de los golpes", (aciertos + confundidos) / tot >= 0.6,
+  `${aciertos + confundidos}/${tot} dispararon`);
 
 check("casi nunca confunde un objeto con otro", confundidos / tot <= 0.08,
   confundidos + " confundidos de " + tot);
@@ -229,6 +234,30 @@ for (let k = 0; k < 20; k++) {
 }
 check("los objetos no aprendidos no disparan pads", desconocidos / desconocidosTot >= 0.9,
   `${desconocidos}/${desconocidosTot}`);
+
+// --- el slider tiene que exigir MAS al subirlo (estuvo invertido una vez) ---
+function appCon(val){
+  const ac = loadApp();
+  ac.document.getElementById = () => ({ value: String(val), checked:false, textContent:"", innerHTML:"",
+    classList:{add(){},remove(){}}, style:{}, children:[], insertBefore(){}, removeChild(){}, appendChild(){} });
+  return ac;
+}
+const padsRaros = names.map(n => ({ name:n, def:n, samples: prints[n].slice(0,5), buffer:null, el:null }));
+function limiteCon(val){
+  const ac = appCon(val);
+  ac.S.pads = padsRaros.map(p => ({ name:p.name, def:p.def, samples:p.samples, buffer:null, el:null }));
+  const r = ac.classify(prints[names[0]][5]);
+  return r.limit;
+}
+const limPerm = limiteCon(1.5), limEstr = limiteCon(6);
+check("subir la exigencia achica el limite", limEstr < limPerm,
+  `exigencia 1.5 -> ${limPerm.toFixed(2)} | exigencia 6 -> ${limEstr.toFixed(2)}`);
+
+// --- la distancia no puede ignorar bandas (estuvo desincronizada 10 vs 12) ---
+const nBandas = first.bands.length;
+const opuesto = { bands: first.bands.map(v => -v), centroid: first.centroid, decay: first.decay };
+check("la distancia mira todas las bandas", DIST(first, opuesto) > 1,
+  `${nBandas} bandas, distancia con el espectro invertido ${DIST(first, opuesto).toFixed(2)}`);
 
 console.log(`\n${ok} OK, ${fail} FALLA`);
 process.exit(fail ? 1 : 0);

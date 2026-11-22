@@ -40,30 +40,45 @@ Cada golpe queda descrito por:
   click, una puerta o ruido de fondo se apagan al toque. Este rasgo es el que más
   ayuda a no disparar con cualquier cosa.
 
-La clasificación promedia las 3 muestras más cercanas de cada pad (k-NN con k=3),
-así una muestra rara no arrastra la decisión.
+**Cada banda pesa distinto, y eso es la clave.** Al aprender se mide cuánto
+varía cada banda en ese objeto. Una banda que suena siempre igual es muy
+informativa y pesa mucho; una banda que se mueve (porque el golpe cae en otro
+punto del objeto) pesa poco. Es un modelo gaussiano por banda.
 
-**El umbral no es fijo, es propio de cada pad.** Una caja de madera suena casi
-igual siempre; un vaso cambia mucho según dónde lo golpeás. Por eso al aprender se
-mide la dispersión de ese pad y el límite sale de ahí (multiplicado por el slider
-*Exigencia*, 3.0 por defecto). Un valor fijo, medido, no separaba nada: la
-dispersión interna de un objeto llegaba a 4.3 y la distancia entre objetos a 2.9.
+Esto no es un detalle: con objetos reales, un k-NN con umbral se queda corto
+porque la variación del mismo objeto es tan grande como la diferencia entre
+objetos distintos. Medido: 0.70x de separación, o sea imposible de separar. Con
+el modelo por banda, los mismos datos pasan de 50% a 100% de aciertos.
 
-Además se rechaza el golpe cuando dos pads quedan parejos (*ambiguo*): si el
-golpe se parece casi igual a dos objetos, no hay razón para elegir uno.
+**Se exigen dos cosas para disparar:**
+
+- El pad ganador tiene que explicar el golpe dentro de unos pocos desvíos. Esto
+  frena los ruidos, que quedan lejísimos de todo lo aprendido.
+- El ganador tiene que ser claramente mejor que el segundo pad. Esto frena un
+  objeto que nunca se aprendió, que queda parecido a todos por igual.
+
+Si el golpe no pasa los dos, no suena nada. Es a propósito: rechazar es
+recuperable (golpeás de nuevo), confundir suena mal siempre.
+
+El slider *Exigencia* mueve los dos límites. Más alto = acepta menos.
 
 ## Resultados medidos
 
-Objetos sintéticos con 14 a 24 modos resonantes, variando amplitud, afinación
-±1.5%, amortiguamiento y fase entre golpes (lo que pasa al golpear distintos
-puntos del mismo objeto):
+Objetos sintéticos que se solapan en frecuencia (el caso difícil), variando
+amplitud, afinación ±2%, amortiguamiento y fase entre golpes (lo que pasa al
+golpear distintos puntos del mismo objeto). 5 golpes de entrenamiento y 19 de
+prueba por objeto:
 
 | Prueba | Resultado |
 |---|---|
-| Clasificar el objeto correcto | 90% |
+| Clasificar el objeto correcto | 92% |
+| Confundir un objeto con otro | 0% |
 | Rechazar ruidos (voz, siseo, click, roce) | 100% |
-| Rechazar objetos nunca aprendidos | 95% |
-| Confundir un objeto con otro | 4% |
+| Rechazar objetos nunca aprendidos | 93% |
+
+Con objetos muy densos en resonancias (14 a 24 modos, más que cualquier cosa de
+la casa) el detector se vuelve conservador: dispara el 75% de los golpes, y de
+los que dispara acierta el 100%.
 
 El código anterior a estos cambios rechazaba **0 de 5** ruidos de prueba y
 clasificaba todo como un pad.
