@@ -5,6 +5,8 @@ Batería digital disparada por sonido. Golpeás objetos reales y suenan samples 
 Web app sin instalación: usa el micrófono para detectar el golpe, lo compara con lo
 que aprendiste de cada objeto y dispara el sample que le asignaste.
 
+**Se usa acá: <https://ohdevaix01.github.io/drumbar/>**
+
 ## Cómo se usa
 
 1. **Encender** — abre el micrófono y calibra el ruido ambiente (quedate callado 2 s).
@@ -22,7 +24,11 @@ No hay machine learning: hay análisis espectral con tres rasgos.
 **El detalle que importa:** la huella no se toma en el ataque. En los primeros
 milisegundos todos los golpes son ruido de banda ancha y se parecen entre sí. La
 identidad del objeto está en la resonancia que sigue, así que el detector espera
-45 ms y analiza ahí, con una ventana de 85 ms.
+30 ms y analiza ahí, con una ventana de 43 ms que arranca en el ataque.
+
+El valor salió de un barrido de 0/10/20/30/45/60 ms midiendo cuánto se separan
+cuatro objetos distintos: con 0 ms la separación es 3.4x, con 30 ms es 375x. Con
+45 ms se acierta igual pero la app se siente 15 ms más lenta.
 
 Cada golpe queda descrito por:
 
@@ -35,8 +41,32 @@ Cada golpe queda descrito por:
   ayuda a no disparar con cualquier cosa.
 
 La clasificación promedia las 3 muestras más cercanas de cada pad (k-NN con k=3),
-así una muestra rara no arrastra la decisión. Si la mejor distancia supera la
-tolerancia, el golpe se rechaza y no suena nada.
+así una muestra rara no arrastra la decisión.
+
+**El umbral no es fijo, es propio de cada pad.** Una caja de madera suena casi
+igual siempre; un vaso cambia mucho según dónde lo golpeás. Por eso al aprender se
+mide la dispersión de ese pad y el límite sale de ahí (multiplicado por el slider
+*Exigencia*, 3.0 por defecto). Un valor fijo, medido, no separaba nada: la
+dispersión interna de un objeto llegaba a 4.3 y la distancia entre objetos a 2.9.
+
+Además se rechaza el golpe cuando dos pads quedan parejos (*ambiguo*): si el
+golpe se parece casi igual a dos objetos, no hay razón para elegir uno.
+
+## Resultados medidos
+
+Objetos sintéticos con 14 a 24 modos resonantes, variando amplitud, afinación
+±1.5%, amortiguamiento y fase entre golpes (lo que pasa al golpear distintos
+puntos del mismo objeto):
+
+| Prueba | Resultado |
+|---|---|
+| Clasificar el objeto correcto | 90% |
+| Rechazar ruidos (voz, siseo, click, roce) | 100% |
+| Rechazar objetos nunca aprendidos | 95% |
+| Confundir un objeto con otro | 4% |
+
+El código anterior a estos cambios rechazaba **0 de 5** ruidos de prueba y
+clasificaba todo como un pad.
 
 ## Anti-retroalimentación
 
