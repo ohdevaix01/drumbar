@@ -58,8 +58,10 @@ console.log(`bandEdges: ${edges.join(",")}`);
 console.log(mono && inRange ? "  OK (monotonico, en rango)" : "  FALLA");
 
 /* ---- 3. distancia: misma huella = 0, opuestas = grande ---- */
-const graves = { bands: [0.9, 0.05, 0.02, 0.01, 0.01, 0.01, 0, 0, 0, 0], centroid: 0.1 };
-const agudos = { bands: [0.01, 0.02, 0.03, 0.05, 0.1, 0.15, 0.2, 0.2, 0.15, 0.09], centroid: 0.8 };
+// Las huellas reales vienen en dB y centradas en 0 (se les resta la media),
+// no en escala lineal 0..1: el test tiene que usar la misma escala.
+const graves = { bands: [-17, 15, 9, 5, 3, 1, -1, -3, -5, -7], centroid: 0.12, decay: 0.75 };
+const agudos = { bands: [8, 6, 4, 2, 0, -2, -4, -6, -8, -10], centroid: 0.85, decay: 0.60 };
 const dSame = distance(graves, graves);
 const dDiff = distance(graves, agudos);
 console.log(`distancia misma huella: ${dSame.toFixed(4)} (esperado 0)`);
@@ -68,12 +70,12 @@ console.log(dSame === 0 && dDiff > 0.5 ? "  OK" : "  FALLA");
 
 /* ---- 4. distancia: variacion leve del mismo sonido debe ser chica ---- */
 const graves2 = {
-  bands: graves.bands.map((v, i) => v * (1 + (i % 2 ? 0.08 : -0.05))),
-  centroid: 0.11,
+  bands: graves.bands.map((v, i) => v + (i % 2 ? 0.8 : -0.6)),
+  centroid: 0.13, decay: 0.73,
 };
 const dNear = distance(graves, graves2);
-console.log(`distancia misma fuente con ruido: ${dNear.toFixed(4)} (esperado < 0.2)`);
-console.log(dNear < 0.2 ? "  OK" : "  FALLA");
+console.log(`distancia misma fuente con ruido: ${dNear.toFixed(4)} (esperado < 1.5)`);
+console.log(dNear < 1.5 ? "  OK" : "  FALLA");
 
 /* ---- 5. separacion: la variacion intra-clase debe ser menor que inter-clase ---- */
 console.log(
@@ -83,18 +85,24 @@ console.log(
 );
 
 /* ---- 6. clasificacion con umbral ---- */
+// el clasificador mide la dispersion propia de cada pad, asi que necesita mas
+// de una muestra por pad (con una sola no hay dispersion que medir)
+const gravesB = { bands: graves.bands.map((v, i) => v + (i % 2 ? -0.7 : 0.5)), centroid: 0.11, decay: 0.78 };
+const agudosB = { bands: agudos.bands.map((v, i) => v + (i % 2 ? 0.9 : -0.8)), centroid: 0.87, decay: 0.58 };
 S.pads = [
-  { name: "bombo", def: "bombo", samples: [graves], buffer: null, el: mkEl() },
-  { name: "charles", def: "charles", samples: [agudos], buffer: null, el: mkEl() },
+  { name: "bombo", def: "bombo", samples: [graves, gravesB], buffer: null, el: mkEl() },
+  { name: "charles", def: "charles", samples: [agudos, agudosB], buffer: null, el: mkEl() },
 ];
 global.document.getElementById = () => {
   const e = mkEl();
-  e.value = "0.35";
+  e.value = "3";
   return e;
 };
 const c1 = classify(graves2);
 const c2 = classify(agudos);
-const c3 = classify({ bands: [0.2, 0.2, 0.2, 0.1, 0.1, 0.1, 0.05, 0.03, 0.01, 0.01], centroid: 0.45 });
+// un ruido: espectro plano (no se parece a ninguno de los dos objetos)
+const plano = new Array(graves.bands.length).fill(0);
+const c3 = classify({ bands: plano, centroid: 0.45, decay: 0.02 });
 console.log(`clasificar bombo -> pad ${c1.pad} (esperado 0)`);
 console.log(`clasificar charles -> pad ${c2.pad} (esperado 1)`);
 console.log(`clasificar desconocido -> pad ${c3.pad} (esperado -1)`);

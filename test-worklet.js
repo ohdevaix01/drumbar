@@ -1,5 +1,5 @@
 // Prueba el AudioWorklet real simulando el runtime de audio.
-// Ojo: el evento "onset" ya no sale en el ataque, sale ~45 ms despues (cuando
+// Ojo: el evento "onset" ya no sale en el ataque, sale ~30 ms despues (cuando
 // ya se puede analizar la resonancia). Los tests tienen que alimentar audio
 // suficiente despues del golpe para que llegue.
 const fs = require("fs");
@@ -98,7 +98,7 @@ check("las bandas estan centradas en 0 (normalizadas)", on &&
   on ? "media=" + (on.bands.reduce((a, b) => a + b, 0) / on.bands.length).toFixed(4) : "");
 check("el evento trae decaimiento", on && typeof on.decay === "number",
   on ? "decay=" + on.decay.toFixed(3) : "");
-check("el evento llega con retardo de analisis", on && on.delayMs >= 45,
+check("el evento llega con retardo de analisis", on && on.delayMs >= 30,
   on ? "delay=" + on.delayMs.toFixed(1) + " ms" : "");
 
 /* 4. sonido sostenido no retriggerea */

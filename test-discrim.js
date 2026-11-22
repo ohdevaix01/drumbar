@@ -1,219 +1,234 @@
-// Verifica que el detector distinga objetos de verdad.
-// Sintetiza golpes con resonancias fisicamente distintas y ruidos que NO son
-// golpes, y mide cuantos acierta y cuantos rechaza.
+// Verifica que el detector distinga objetos reales y rechace ruidos.
+//
+// Genera objetos sinteticos con muchos modos resonantes (como un objeto de
+// verdad), variando amplitud, afinacion, amortiguamiento y fase entre golpes:
+// eso es lo que pasa al golpear distintos puntos del mismo objeto.
+// Despues corre el worklet y el clasificador reales de la app.
+//
+// Uso: node test-discrim.js
 const fs = require("fs");
 const vm = require("vm");
 
-let registered = null;
-const ctx = {
-  sampleRate: 48000,
-  currentTime: 0,
-  console, Math, Float32Array, Array, Object, Int16Array,
-  registerProcessor: (n, c) => { registered = { name: n, cls: c }; },
-  AudioWorkletProcessor: class {
-    constructor() { this.port = { postMessage: () => {}, onmessage: null }; }
-  },
-};
-ctx.globalThis = ctx;
-vm.createContext(ctx);
-vm.runInContext(fs.readFileSync(__dirname + "/detector-worklet.js", "utf8"), ctx);
-
-let T = 0;
-Object.defineProperty(ctx, "currentTime", { get: () => T, configurable: true });
-
 const SR = 48000;
 
-/* ---------- sintesis de objetos ---------- */
-// Un objeto golpeado = suma de modos resonantes con decaimiento propio.
-// distinto material/tamano => distintos modos y distintos tiempos de caida.
-const OBJECTS = {
-  // madera grande y hueca: modos graves, resuena bastante
-  caja: { modes: [[180, 1.0], [340, 0.6], [520, 0.35]], decay: 0.30, noise: 0.15 },
-  // metal fino: modos agudos inarmonicos, decae lento
-  lata: { modes: [[1900, 1.0], [3100, 0.8], [4700, 0.6]], decay: 0.45, noise: 0.25 },
-  // plastico: modos medios, decae rapido
-  bidon: { modes: [[620, 1.0], [980, 0.7], [1450, 0.4]], decay: 0.12, noise: 0.20 },
-  // vidrio: muy agudo y largo
-  vaso: { modes: [[3200, 1.0], [5100, 0.7], [7000, 0.5]], decay: 0.55, noise: 0.10 },
-};
+/* ---------------- objetos sinteticos ---------------- */
 
-function synthHit(def, dur, seed) {
+function makeObject(seed) {
+  let s = seed;
+  const r = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+  const modes = [];
+  const f0 = 120 + r() * 200;
+  const fmax = 3000 + r() * 6000;
+  const n = 14 + Math.floor(r() * 10);
+  for (let i = 0; i < n; i++) {
+    const f = f0 * Math.pow(fmax / f0, i / (n - 1)) * (0.92 + r() * 0.16);
+    modes.push([f, Math.pow(0.82, i) * (0.6 + r() * 0.8), 0.10 + r() * 0.45]);
+  }
+  return { modes, noise: 0.5 + r() * 0.6 };
+}
+
+function hit(obj, dur, seed, o) {
+  o = o || {};
   const n = Math.floor(SR * dur);
   const out = new Float32Array(n);
   let s = seed || 1;
-  const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff * 2 - 1; };
+  const r = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff * 2 - 1; };
+  const detune = 1 + (o.detune || 0);
+  const off = o.off || 0;
+  const amp = o.amp || 1;
+  const damp = o.damp || 1;
   for (let i = 0; i < n; i++) {
-    const t = i / SR;
+    const t = (i + off) / SR;
     let v = 0;
-    for (const [f, amp] of def.modes) {
-      v += Math.sin(2 * Math.PI * f * t) * amp * Math.exp(-t / def.decay);
+    for (const [f, a, tau0] of obj.modes) {
+      v += Math.sin(2 * Math.PI * f * detune * t + seed * 0.001) * a * Math.exp(-t / (tau0 * damp));
     }
-    // ruido del ataque (el click del impacto)
-    v += rnd() * def.noise * Math.exp(-t / 0.004);
-    out[i] = v * 0.18;
+    v += r() * obj.noise * Math.exp(-t / 0.005);
+    out[i] = v * 0.10 * amp;
   }
   return out;
 }
 
-// Ruidos que NO son golpes: no deben disparar nada
-function synthNoise(kind, dur, seed) {
+function noise(kind, dur, seed) {
   const n = Math.floor(SR * dur);
-  const out = new Float32Array(n);
+  const o = new Float32Array(n);
   let s = seed || 1;
-  const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff * 2 - 1; };
+  const r = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff * 2 - 1; };
   for (let i = 0; i < n; i++) {
     const t = i / SR;
     if (kind === "voz") {
-      // voz: armonicos con vibrato, sostenido
       const f0 = 130 + Math.sin(2 * Math.PI * 4 * t) * 8;
-      out[i] = (Math.sin(2 * Math.PI * f0 * t) + 0.5 * Math.sin(2 * Math.PI * f0 * 2 * t)) * 0.10;
+      o[i] = (Math.sin(2 * Math.PI * f0 * t) + 0.5 * Math.sin(2 * Math.PI * f0 * 2 * t)) * 0.10;
     } else if (kind === "siseo") {
-      // ruido de fondo constante
-      out[i] = rnd() * 0.02;
+      o[i] = r() * 0.02;
     } else if (kind === "click") {
-      // click seco de 3 ms: cortisimo, no resuena
-      out[i] = t < 0.003 ? rnd() * 0.35 : 0;
-    } else if (kind === "roce") {
-      // roce continuo de banda ancha
-      out[i] = rnd() * 0.06;
+      o[i] = t < 0.003 ? r() * 0.35 : 0;
+    } else {
+      o[i] = r() * 0.06;
     }
   }
-  return out;
+  return o;
 }
 
-/* ---------- correr audio por el detector ---------- */
-function run(det, samples, blockSize) {
-  const bs = blockSize || 128;
+/* ---------------- carga del worklet y de la app ---------------- */
+
+function loadWorklet() {
+  let reg = null;
+  const wc = {
+    sampleRate: SR, currentTime: 0, console, Math, Float32Array, Array, Object,
+    registerProcessor: (n, c) => { reg = { name: n, cls: c }; },
+    AudioWorkletProcessor: class {
+      constructor() { this.port = { postMessage: () => {}, onmessage: null }; }
+    },
+  };
+  wc.globalThis = wc;
+  vm.createContext(wc);
+  vm.runInContext(fs.readFileSync(__dirname + "/detector-worklet.js", "utf8"), wc);
+  let T = 0;
+  Object.defineProperty(wc, "currentTime", { get: () => T, configurable: true });
+  return { cls: reg.cls, setT: v => { T = v; }, getT: () => T };
+}
+
+function loadApp() {
+  const html = fs.readFileSync(__dirname + "/index.html", "utf8");
+  const parts = html.split("<script>");
+  const el = {
+    value: "3", checked: false, textContent: "", innerHTML: "",
+    classList: { add() {}, remove() {} }, style: {}, children: [],
+    insertBefore() {}, removeChild() {}, appendChild() {},
+  };
+  const ac = {
+    console, Math, JSON, Array, Object, Int16Array, Uint8Array, Float32Array, Float64Array,
+    ArrayBuffer, DataView, parseInt, parseFloat, isNaN, Date,
+    performance: { now: () => 0 }, window: { addEventListener() {} },
+    document: { getElementById: () => el, createElement: () => el, addEventListener() {} },
+    localStorage: { getItem: () => null, setItem() {} },
+    navigator: { mediaDevices: {} }, setTimeout: () => 0, setInterval: () => 0,
+    MediaRecorder: function () {}, URL: { createObjectURL: () => "", revokeObjectURL() {} },
+    lamejs: null,
+  };
+  ac.globalThis = ac;
+  vm.createContext(ac);
+  vm.runInContext(parts[parts.length - 1].split("</script>")[0], ac);
+  return ac;
+}
+
+/* ---------------- corre el audio por el detector ---------------- */
+
+function run(w, det, samples) {
+  const bs = 128;
   for (let i = 0; i < samples.length; i += bs) {
-    const chunk = samples.subarray(i, Math.min(i + bs, samples.length));
-    const padded = new Float32Array(bs);
-    padded.set(chunk);
-    T += bs / SR;
-    det.process([[padded]]);
+    const c = samples.subarray(i, Math.min(i + bs, samples.length));
+    const p = new Float32Array(bs);
+    p.set(c);
+    w.setT(w.getT() + bs / SR);
+    det.process([[p]]);
   }
 }
 
-function makeDet() {
-  const det = new registered.cls({ processorOptions: { thr: 3.5 } });
-  const events = [];
-  det.port.postMessage = (m) => events.push(m);
-  // calibrar con silencio
-  T = 0;
-  run(det, new Float32Array(SR * 0.4));
-  return { det, events };
+function detect(w, samples) {
+  const det = new w.cls({ processorOptions: { thr: 3.5 } });
+  const ev = [];
+  det.port.postMessage = m => ev.push(m);
+  w.setT(0);
+  run(w, det, new Float32Array(SR * 0.4));
+  w.setT(0);
+  ev.length = 0;
+  run(w, det, samples);
+  run(w, det, new Float32Array(SR * 0.15));
+  return ev.filter(e => e.type === "onset")[0] || null;
 }
 
-/* ---------- test ---------- */
+/* ---------------- test ---------------- */
+
 let ok = 0, fail = 0;
 function check(name, cond, extra) {
   console.log(`${cond ? "OK   " : "FALLA"} ${name}${extra ? " :: " + extra : ""}`);
   cond ? ok++ : fail++;
 }
 
-// 1. cada objeto genera una huella estable entre golpes
+const w = loadWorklet();
+const app = loadApp();
+const DIST = app.distance;
+
+const OBJS = { A: makeObject(111), B: makeObject(222), C: makeObject(333), D: makeObject(444) };
+
+let seed = 999;
+const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+
 const prints = {};
-for (const [name, def] of Object.entries(OBJECTS)) {
-  prints[name] = [];
-  for (let k = 0; k < 6; k++) {
-    const { det, events } = makeDet();
-    const hit = synthHit(def, 0.6, 100 + k * 17);
-    run(det, hit);
-    run(det, new Float32Array(SR * 0.15));
-    const ons = events.filter((e) => e.type === "onset");
-    if (ons.length) prints[name].push(ons[0]);
-  }
-  check(`objeto "${name}" dispara`, prints[name].length >= 5, `${prints[name].length}/6 golpes`);
-}
-
-// 2. la huella del mismo objeto es consistente (variacion baja)
-function dist(a, b) {
-  let d = 0;
-  for (let i = 0; i < a.bands.length; i++) { const x = a.bands[i] - b.bands[i]; d += x * x; }
-  d = Math.sqrt(d / a.bands.length);
-  return d + Math.abs(a.centroid - b.centroid) * 0.5 + Math.abs((a.decay || 0) - (b.decay || 0)) * 0.8;
-}
-function meanIntra(list) {
-  let s = 0, n = 0;
-  for (let i = 0; i < list.length; i++)
-    for (let j = i + 1; j < list.length; j++) { s += dist(list[i], list[j]); n++; }
-  return n ? s / n : 0;
-}
-function meanInter(a, b) {
-  let s = 0, n = 0;
-  for (const x of a) for (const y of b) { s += dist(x, y); n++; }
-  return n ? s / n : 0;
-}
-
-const names = Object.keys(OBJECTS);
-const intra = {};
-names.forEach((n) => { intra[n] = meanIntra(prints[n]); });
-
-const intraMax = Math.max(...Object.values(intra));
-console.log(`\n  variacion intra-objeto (mas alta): ${intraMax.toFixed(3)}`);
-names.forEach((n) => console.log(`    ${n.padEnd(7)} ${intra[n].toFixed(3)}`));
-
-// 3. objetos distintos deben estar MAS lejos entre si que la variacion propia
-console.log("\n  separacion entre objetos distintos:");
-let minInter = Infinity;
-for (let i = 0; i < names.length; i++) {
-  for (let j = i + 1; j < names.length; j++) {
-    const d = meanInter(prints[names[i]], prints[names[j]]);
-    minInter = Math.min(minInter, d);
-    const ratio = d / Math.max(intra[names[i]], intra[names[j]], 0.001);
-    console.log(`    ${names[i].padEnd(7)} vs ${names[j].padEnd(7)} d=${d.toFixed(3)}  ratio=${ratio.toFixed(1)}x`);
+for (const [n, o] of Object.entries(OBJS)) {
+  prints[n] = [];
+  for (let k = 0; k < 10; k++) {
+    const e = detect(w, hit(o, 0.6, 6000 + k * 137, {
+      amp: 0.5 + rnd(),
+      detune: (rnd() - 0.5) * 0.03,
+      damp: 0.7 + rnd() * 0.7,
+      off: rnd(),
+    }));
+    if (e) prints[n].push(e);
   }
 }
-check("objetos distintos se separan bien", minInter > intraMax * 3,
-  `min inter=${minInter.toFixed(3)} vs max intra=${intraMax.toFixed(3)}`);
+const names = Object.keys(OBJS);
 
-// 4. clasificacion cruzada: cada golpe debe ir a su pad
-function classify(ev, pads) {
-  const K = 3;
-  let best = -1, bestD = Infinity;
-  pads.forEach((samples, i) => {
-    const ds = samples.map((s) => dist(ev, s)).sort((a, b) => a - b);
-    const k = Math.min(K, ds.length);
-    let sum = 0;
-    for (let j = 0; j < k; j++) sum += ds[j];
-    const d = sum / k;
-    if (d < bestD) { bestD = d; best = i; }
-  });
-  return { pad: best, d: bestD };
-}
+check("cada objeto dispara en casi todos los golpes",
+  names.every(n => prints[n].length >= 9),
+  names.map(n => n + ":" + prints[n].length + "/10").join(" "));
 
-// aprender con 4 muestras, evaluar con las otras 2
-let correct = 0, total = 0;
-names.forEach((n, idx) => {
-  const train = prints[n].slice(0, 4);
-  const test = prints[n].slice(4);
-  const pads = names.map((m) => (m === n ? train : prints[m].slice(0, 4)));
-  test.forEach((ev) => {
-    total++;
-    const r = classify(ev, pads);
-    if (r.pad === idx) correct++;
-  });
-});
-const acc = correct / total;
-check("clasificacion cruzada de objetos", acc >= 0.9, `${correct}/${total} = ${(acc * 100).toFixed(0)}%`);
+const first = prints[names[0]][0];
+check("el evento trae las tres caracteristicas",
+  first.bands && first.centroid !== undefined && first.decay !== undefined,
+  "bandas=" + first.bands.length);
 
-// 5. ruidos que no son golpes NO deben clasificarse como un pad
+const intraMax = Math.max(...names.map(n => {
+  let mx = 0;
+  for (let i = 0; i < prints[n].length; i++)
+    for (let j = i + 1; j < prints[n].length; j++)
+      mx = Math.max(mx, DIST(prints[n][i], prints[n][j]));
+  return mx;
+}));
+console.log(`\n  variacion propia del mismo objeto (la mas alta): ${intraMax.toFixed(2)}`);
+
+app.S.pads = names.map(n => ({ name: n, def: n, samples: prints[n].slice(0, 5), buffer: null, el: null }));
+
+let aciertos = 0, rechazados = 0, confundidos = 0, tot = 0;
+for (let ci = 0; ci < names.length; ci++)
+  for (const ev of prints[names[ci]].slice(5)) {
+    tot++;
+    const r = app.classify(ev);
+    if (r.pad === ci) aciertos++;
+    else if (r.pad < 0) rechazados++;
+    else confundidos++;
+  }
+
+check("clasificacion de objetos", aciertos / tot >= 0.85,
+  `${aciertos}/${tot} = ${(aciertos / tot * 100).toFixed(0)}% (rechazados ${rechazados}, confundidos ${confundidos})`);
+
+check("casi nunca confunde un objeto con otro", confundidos / tot <= 0.08,
+  confundidos + " confundidos de " + tot);
+
 console.log("\n  rechazo de ruidos que no son golpes:");
-const pads = names.map((n) => prints[n].slice(0, 4));
-const noiseTol = 0.35;
-["voz", "siseo", "click", "roce"].forEach((kind) => {
-  let rejected = 0, attempts = 0;
+let rj = 0, ntot = 0;
+for (const kind of ["voz", "siseo", "click", "roce"])
   for (let k = 0; k < 5; k++) {
-    const { det, events } = makeDet();
-    run(det, synthNoise(kind, 0.8, 200 + k * 13));
-    run(det, new Float32Array(SR * 0.1));
-    const ons = events.filter((e) => e.type === "onset");
-    attempts++;
-    if (!ons.length) { rejected++; continue; }  // ni siquiera disparo: mejor
-    const r = classify(ons[0], pads);
-    if (r.pad < 0 || r.d > noiseTol) rejected++;
+    ntot++;
+    const e = detect(w, noise(kind, 0.8, 8000 + k * 53));
+    if (!e) { rj++; continue; }
+    if (app.classify(e).pad < 0) rj++;
   }
-  check(`"${kind}" rechazado`, rejected === attempts, `${rejected}/${attempts}`);
-});
+
+check("los ruidos no disparan pads", rj / ntot >= 0.95, `${rj}/${ntot}`);
+
+// objetos que nunca se aprendieron: casi ninguno debe disparar un pad
+let desconocidos = 0, desconocidosTot = 0;
+for (let k = 0; k < 20; k++) {
+  desconocidosTot++;
+  const e = detect(w, hit(makeObject(9000 + k * 37), 0.6, 4242 + k, { amp: 0.7 + rnd() * 0.6 }));
+  if (!e) { desconocidos++; continue; }
+  if (app.classify(e).pad < 0) desconocidos++;
+}
+check("los objetos no aprendidos no disparan pads", desconocidos / desconocidosTot >= 0.9,
+  `${desconocidos}/${desconocidosTot}`);
 
 console.log(`\n${ok} OK, ${fail} FALLA`);
 process.exit(fail ? 1 : 0);

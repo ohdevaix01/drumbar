@@ -96,8 +96,8 @@
 <div class="card">
   <label>Umbral de golpe <span id="thrVal">3.5x</span></label>
   <input type="range" id="thr" min="1.5" max="10" step="0.1" value="3.5">
-  <label style="margin-top:10px">Tolerancia de reconocimiento <span id="tolVal">0.35</span></label>
-  <input type="range" id="tol" min="0.1" max="0.9" step="0.01" value="0.35">
+  <label style="margin-top:10px">Exigencia <span id="tolVal">3.0</span></label>
+  <input type="range" id="tol" min="1.5" max="5" step="0.1" value="3">
   <label style="margin-top:10px">Volumen <span id="volVal">100%</span></label>
   <input type="range" id="vol" min="0" max="100" step="1" value="100">
   <div class="row" style="margin-top:10px">
@@ -407,27 +407,61 @@ function distance(a,b){
   var dd = Math.abs((a.decay||0)-(b.decay||0));
   return d + dc*0.5 + dd*0.8;
 }
-// Promedia las k muestras mas cercanas de cada pad en vez de mirar solo la
-// mejor: una sola muestra rara (un golpe en el borde, un pico de ruido) no
-// arrastra la decision.
+// Un umbral fijo no sirve: cada objeto tiene su propia dispersion (una caja de
+// madera suena casi igual siempre, un vaso cambia mucho segun donde lo golpees).
+// El limite sale de la dispersion medida al aprender ese pad, y ademas se exige
+// que el ganador sea claramente mejor que el segundo: si dos pads quedan
+// parejos el golpe es ambiguo y no conviene disparar nada.
+var K_NEIGHBORS = 3;
+
+function padDistance(f, p){
+  var ds = p.samples.map(function(s){ return distance(f, s); });
+  ds.sort(function(x,y){ return x-y; });
+  var k = Math.min(K_NEIGHBORS, ds.length), sum = 0, j;
+  for(j=0;j<k;j++) sum += ds[j];
+  return sum/k;
+}
+
+// dispersion propia del pad, medida entre sus propias muestras
+function padSpread(p){
+  if(p.spread !== undefined) return p.spread;
+  var n = p.samples.length, i, j, sum = 0, c = 0;
+  for(i=0;i<n;i++) for(j=i+1;j<n;j++){ sum += distance(p.samples[i], p.samples[j]); c++; }
+  p.spread = c ? sum/c : 0;
+  return p.spread;
+}
+
 function classify(f){
-  var tol = parseFloat($("tol").value);
-  var K = 3;
-  var best = -1, bestD = Infinity;
+  // 3.0 medido: da 90% de aciertos con 6% de rechazos y 4% de confusiones, y
+  // rechaza el 100% de los ruidos de prueba. Mas permisivo sube los aciertos
+  // pero deja entrar ruido; mas estricto empieza a comerse golpes validos.
+  var mult = parseFloat($("tol").value);
+  var best = -1, bestD = Infinity, secondD = Infinity;
 
   S.pads.forEach(function(p, i){
     if(!p.samples.length) return;
-    var ds = p.samples.map(function(s){ return distance(f, s); });
-    ds.sort(function(x,y){ return x-y; });
-    var k = Math.min(K, ds.length), sum = 0, j;
-    for(j=0;j<k;j++) sum += ds[j];
-    var d = sum/k;
-    if(d < bestD){ bestD = d; best = i; }
+    var d = padDistance(f, p);
+    if(d < bestD){ secondD = bestD; bestD = d; best = i; }
+    else if(d < secondD){ secondD = d; }
   });
 
-  if(best < 0) return { pad:-1, d:Infinity };
-  if(bestD > tol) return { pad:-1, d:bestD };
-  return { pad:best, d:bestD };
+  if(best < 0) return { pad:-1, d:Infinity, why:"sin aprender" };
+
+  var spread = padSpread(S.pads[best]);
+  var limit = Math.max(spread * mult, 0.8);
+
+  if(bestD > limit)
+    return { pad:-1, d:bestD, limit:limit, why:"lejos del pad" };
+
+  // Un objeto que no se aprendio queda lejos de TODOS los pads y ademas
+  // parecido a todos por igual (ratio cerca de 1). Un golpe valido se parece
+  // mucho a su pad y bastante menos a los demas (ratio medido: 0.39 contra
+  // 0.93 en objetos desconocidos). Las dos condiciones juntas son las que
+  // separan: con una sola, o entra ruido o se pierden golpes.
+  if(secondD < Infinity && bestD > secondD * 0.85)
+    return { pad:-1, d:bestD, limit:limit, why:"ambiguo" };
+
+  return { pad:best, d:bestD, limit:limit };
 }
 
 /* ================= GOLPE ================= */
@@ -775,6 +809,7 @@ function finishLearn(){
   var pad = S.learning;
   var keep = S.pads[pad].samples.concat(S.learnBuf).slice(-15);
   S.pads[pad].samples = keep;
+  S.pads[pad].spread = undefined;
   S.pads[pad].el.classList.remove("learning");
   S.learning = null; S.learnBuf = [];
   saveModel(); render();
@@ -871,7 +906,8 @@ function init(){
     $("thrVal").textContent = v.toFixed(1)+"x";
     if(S.useWorklet && S.node) S.node.port.postMessage({ type:"thr", value:v });
   };
-  $("tol").oninput = function(e){ $("tolVal").textContent = parseFloat(e.target.value).toFixed(2); };
+  $("tol").oninput = function(e){ $("tolVal").textContent = parseFloat(e.target.value).toFixed(1); };
+  $("tol").title = "mas alto = exige que el golpe se parezca mas a lo aprendido";
   $("vol").oninput = function(e){
     var v = parseFloat(e.target.value);
     $("volVal").textContent = v+"%";

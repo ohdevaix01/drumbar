@@ -57,13 +57,18 @@ class HitDetector extends AudioWorkletProcessor {
     this.ringPos = 0;
 
     // ventana de analisis: 4096 = 85 ms a 48 k
-    this.WIN = 4096;
+    // 2048 muestras = 43 ms. Mas ancho no aporta: la ventana se llena de cola
+    // del propio sonido y diluye la forma del espectro.
+    this.WIN = 2048;
     this.hann = new Float32Array(this.WIN);
     for (var i = 0; i < this.WIN; i++) {
       this.hann[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (this.WIN - 1)));
     }
 
-    this.SKIP_MS = 45;
+    // 30 ms: medido contra alternativas (0/10/20/45/60). Con 45 se acierta
+    // igual pero se siente 15 ms mas lento, y con menos de 20 el ataque todavia
+    // domina el espectro y los objetos se confunden.
+    this.SKIP_MS = 30;
     this.MAX_DELAY_MS = 400;
     this.pending = null;
 
@@ -85,13 +90,14 @@ class HitDetector extends AudioWorkletProcessor {
     };
   }
 
-  // Espectro de la ventana que termina en el instante actual. Se llama 45 ms
-  // despues del ataque, asi que la ventana contiene el cuerpo del sonido.
-  features() {
+  // Espectro de la ventana que ARRANCA en el ataque. Si la ventana terminara en
+  // el instante de analisis, incluiria el silencio previo al golpe y diluiria
+  // el espectro con lo que no es el objeto.
+  features(fromPos, avail) {
     var W = this.WIN, re = new Float32Array(W), im = new Float32Array(W), i;
-    var end = this.ringPos;
     for (i = 0; i < W; i++) {
-      var idx = ((end - W + i) % this.N + this.N) % this.N;
+      if (i >= avail) { re[i] = 0; im[i] = 0; continue; }
+      var idx = ((fromPos + i) % this.N + this.N) % this.N;
       re[i] = this.ring[idx] * this.hann[i];
     }
     fft(re, im);
@@ -125,26 +131,26 @@ class HitDetector extends AudioWorkletProcessor {
     return {
       bands: bands,
       centroid: Math.max(0, Math.min(1, centroid / 6000)),
-      decay: this.decay(),
+      decay: this.decay(fromPos, avail),
     };
   }
 
   // Tiempo que tarda el sonido en apagarse. Un objeto golpeado resuena; un
   // click, un golpe de puerta o un ruido de fondo se apagan al toque. Es el
   // rasgo que mas ayuda a no disparar con cualquier cosa.
-  decay() {
-    var W = this.WIN, i, k, peak = 0, peakAt = 0, env;
-    var end = this.ringPos;
+  decay(fromPos, avail) {
+    var i, k, peak = 0, peakAt = 0;
+    var start = fromPos;
 
-    // envolvente por bloques de 2 ms sobre la ventana
+    // solo sobre las muestras que existen despues del ataque
     var hop = Math.max(1, Math.floor(this.sr * 0.002));
-    var nEnv = Math.floor(W / hop);
-    if (nEnv < 4) return 0;
+    var nEnv = Math.floor(Math.min(avail, this.WIN) / hop);
+    if (nEnv < 3) return 0;
     var e = new Float32Array(nEnv);
     for (k = 0; k < nEnv; k++) {
       var s2 = 0;
       for (i = 0; i < hop; i++) {
-        var idx = ((end - W + k * hop + i) % this.N + this.N) % this.N;
+        var idx = ((start + k * hop + i) % this.N + this.N) % this.N;
         var v = this.ring[idx];
         s2 += v * v;
       }
@@ -161,8 +167,9 @@ class HitDetector extends AudioWorkletProcessor {
     }
     var decayMs = (endK - peakAt) * (hop / this.sr) * 1000;
 
-    // escala logaritmica 0..1: 5 ms -> 0, 500 ms -> 1
-    var v2 = Math.log10(Math.max(decayMs, 5) / 5) / Math.log10(500 / 5);
+    // escala logaritmica entre 3 ms y lo que dura la ventana disponible
+    var top = Math.max(12, (nEnv * hop / this.sr) * 1000);
+    var v2 = Math.log10(Math.max(decayMs, 3) / 3) / Math.log10(top / 3);
     return Math.max(0, Math.min(1, v2));
   }
 
@@ -197,7 +204,8 @@ class HitDetector extends AudioWorkletProcessor {
     if (this.pending) {
       var elapsedMs = (now - this.pending.t) * 1000;
       if (elapsedMs >= this.SKIP_MS) {
-        var f = this.features();
+        var avail = ((this.ringPos - this.pending.pos) % this.N + this.N) % this.N;
+        var f = this.features(this.pending.pos, avail);
         this.port.postMessage({
           type: "onset",
           rms: this.pending.rms,
@@ -229,7 +237,7 @@ class HitDetector extends AudioWorkletProcessor {
     if (this.armed && !blanked && rms > gate && transient && spaced && !this.pending) {
       this.armed = false;
       this.lastOnsetT = now;
-      this.pending = { t: now, rms: rms };
+      this.pending = { t: now, rms: rms, pos: this.ringPos };
     }
 
     return true;
