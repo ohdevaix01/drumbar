@@ -71,10 +71,14 @@ prueba por objeto:
 
 | Prueba | Resultado |
 |---|---|
-| Clasificar el objeto correcto | 92% |
+| Clasificar el objeto correcto | 93% |
 | Confundir un objeto con otro | 0% |
-| Rechazar ruidos (voz, siseo, click, roce) | 100% |
+| Rechazar ruidos (voz, sample de bombo, siseo, click) | 100% |
 | Rechazar objetos nunca aprendidos | 93% |
+
+La exigencia por defecto es 2.5 porque ahí se midió el mejor punto: con 3.0
+los golpes bajan a 73% y los ruidos siguen en 0%. Si te reconoce de menos,
+bajala; si dispara con cosas que no son, subila.
 
 Con objetos muy densos en resonancias (14 a 24 modos, más que cualquier cosa de
 la casa) el detector se vuelve conservador: dispara el 75% de los golpes, y de
